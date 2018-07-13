@@ -14,8 +14,6 @@ import tunable_coupling_util as tcu
 import time
 import multiprocessing as mp
 import datetime
-from joblib import Parallel, delayed
-from joblib.pool import has_shareable_memory
 #%%
 """Simulation constants and the functions directly dependent on them"""
 levels = 5 #Amount of energy levels for qubits
@@ -47,12 +45,6 @@ state020_real = util.find_best_ket_match(eigs[1],s.state020_comp)#Note: not all 
 state011_110_sym_real = util.find_best_ket_match(eigs[1],(s.state011_comp+s.state110_comp).unit())
 state011_110_antisym_real = util.find_best_ket_match(eigs[1],(s.state011_comp-s.state110_comp).unit())
 
-E_000 = eigs[0][util.find_best_ket_match_index(eigs[1],s.state000_comp)]
-E_101 = eigs[0][util.find_best_ket_match_index(eigs[1],s.state101_comp)]
-
-"""The frequency that needs to be corrected for the states 000 and 101 because of their slightly "nonideal" eigenenergies"""
-E_fix_000 = E_000
-E_fix_101 = E_101-2*Eavg
 
 #%%
 """The simulation with 100 different square_pulse amplitudes and 1000 different times using a single starting state. """
@@ -102,52 +94,49 @@ starting_states_coefs = util.g_e_x_y_coefficients()
 start = time.time()#For measuring the time it took to calculate everything
 
 #Finding the correct phis to rotate the qubits, using just some state
-for k in range(0,N):
-    A = As[k]
-    opts = solver.Options(num_cpus=6, atol= 1e-11, rtol= 1e-9,store_states=True, nsteps=1500)
-    args = {'T':T,'A':A}
-    S0 = state000_real+state001_real+state100_real+state101_real
-    Scompare = state000_real+(1.0j)*state001_real+(1.0j)*state100_real+state101_real
-    res = mesolve(H,S0,times,[],[],options=opts,args = args)
-    for i in range(timesteps):
-        fixres = s.dynamic_phase_fixer_5(res.states[i],Scompare,state000_real,state101_real)
-        phis[k,i] = fixres[1]
-    print("Phis calculated for", k, ". amplitude: ", A)
+#for k in range(0,N):
+#    A = As[k]
+#    opts = solver.Options(num_cpus=6, atol= 1e-11, rtol= 1e-9,store_states=True, nsteps=1500)
+#    args = {'T':T,'A':A}
+#    S0 = state000_real+state001_real+state100_real+state101_real
+#    Scompare = state000_real+(1.0j)*state001_real+(1.0j)*state100_real+state101_real
+#    res = mesolve(H,S0,times,[],[],options=opts,args = args)
+#    for i in range(timesteps):
+#        fixres = s.dynamic_phase_fixer_5(res.states[i],Scompare,state000_real,state101_real)
+#        phis[k,i] = fixres[1]
+#    print("Phis calculated for", k, ". amplitude: ", A)
+Scompares = []
+for coefs in starting_states_coefs:
+    Scompares.append(s.state000_real*coefs[0]+1.0j*s.state001_real*coefs[2]\
+            +1.0j*s.state100_real*coefs[1]+s.state101_real*coefs[3])
 
 for k in range(0,N):
     A = As[k]#to be replaced
     opts = solver.Options(num_cpus=6, atol= 1e-11, rtol= 1e-9,store_states=True, nsteps=1500)
     args = {'T':T,'A':A}
     
-    #Fidelities and phase differences for this all the different states on this amplitude
-    amplitude_fidelities = []
+    #The arrays of state vectors for all different starting states on this amplitude
+    amplitude_states = np.zeros(16,timesteps,object)
+    #Fidelities for this all the different starting states on this amplitude
+    amplitude_fidelities = np.zeros(16,timesteps)
+    #Phis for all all different times on this amplitude
+    amplitude_phis = np.zeros(timesteps)
+    #The arrays of fixed state vectors for all different starting states on this amplitude
+    amplitude_fixed_states = np.zeros(16,timesteps,object)
     
-#    def parallel(coefs):
-#        S0 = state000_real*coefs[0]+state001_real*coefs[1]+state100_real*coefs[2]+state101_real*coefs[3]
-#        Scompare = state000_real*coefs[0]+1.0j*state001_real*coefs[2]\
-#            +1.0j*state100_real*coefs[1]+state101_real*coefs[3]#iswapped state
-#        res = mesolve(H,S0,times,[],[],options=opts,args = args)
-#        print("Coefficients ",coefs, " calculated for amplitude ", A)
-#    
-#    pool = mp.Pool(processes=16)
-#    [pool.apply(parallel, args=(coefs,)) for coefs in starting_states_coefs]
-    
+    #Doing the simulation
     for coefs in starting_states_coefs:
-        S0 = state000_real*coefs[0]+state001_real*coefs[1]+state100_real*coefs[2]+state101_real*coefs[3]
-        Scompare = state000_real*coefs[0]+1.0j*state001_real*coefs[2]\
-            +1.0j*state100_real*coefs[1]+state101_real*coefs[3]#iswapped state
-        
-        res = mesolve(H,S0,times,[],[],options=opts,args = args)
-        #Fixing the phase shift of states 000 and 101
-        for i in range(timesteps):
-            res.states[i] = s.rotate_qubit_states(res.states[i],state000_real,state101_real,phis[k,i])
-        amplitude_fidelities.append([abs((Scompare.dag()*state).data.toarray()[0][0])**2 for state in res.states])
+        amplitude_states.append(s.simulate_coefs(coefs,times,H,opts,args))
         print("Coefficients ",coefs, " calculated. Elapsed time:",str(datetime.timedelta(seconds=time.time()-start)))
     
-    for i in range(0,16):
-        all_fidelities[k][i] = amplitude_fidelities[i]
+    #Doing the individual qubit rotation optimization and calculating results
+    for i in range(timesteps):
+        optimres = s.dynamic_phase_fixer_6(amplitude_states[:,i],Scompares)
+        amplitude_phis[i] = optimres[1]
+        avg_fidelities[k,i] = optimres[0]
+        amplitude_fixed_states[:,i] = np.array(optimres[2])
+        all_fidelities[k][:,i] = np.array([abs((Scompare.dag()*state).data.toarray()[0][0])**2 for (Scompare,state) in zip(Scompares,amplitude_fixed_states[:,i])])
     
-    avg_fidelities[k] = np.array([np.mean(fs) for fs in zip(*amplitude_fidelities)])
     print("Fidelities calculated for ", k, ". amplitude: ", A)
 
 end = time.time()
@@ -217,8 +206,8 @@ but using the simpler, computational basis."""
 #         ,all_fidelities=all_fidelities,all_phase_differences=all_phase_differences)
 #%%
 """Just a normal simulation for plotting states below."""
-S0 = ((-1.0j)*state001_real+state100_real+(0.5)*state101_real+(0.0j)*state000_real).unit()
-Scompare = ((0.5)*state101_real+(0.0j)*state000_real+(1.0)*state100_real+(1.0j)*state001_real).unit()
+S0 = ((1)*s.state001_real+(1)*s.state100_real+(1)*s.state101_real+(1)*s.state000_real).unit()
+Scompare = ((1)*s.state101_real+(1)*s.state000_real+(1.0j)*s.state100_real+(1.0j)*s.state001_real).unit()
 used_pulse = tcu.square_pulse
 T = 5e-7
 H = s.simulation_Hamiltonian(used_pulse=used_pulse)
@@ -235,7 +224,7 @@ res_onesimulation_phis = np.zeros(1000)
 
 start = time.time()
 for i in range(1000):
-    fixres = s.dynamic_phase_fixer_5(res_onesimulation.states[i],Scompare,state000_real,state101_real)
+    fixres = s.dynamic_phase_fixer_5(res_onesimulation.states[i],Scompare,s.state000_real,s.state101_real)
     res_onesimulation_phis[i] = fixres[1]
     res_onesimulation.states[i] = fixres[2]
     res_onesimulation_fidelities[i] = fixres[0]

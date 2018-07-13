@@ -50,9 +50,21 @@ class tunable_coupling_simulation:
         
         #Fixing the values of omega[1] and g to the decoupled state
         omega0 = sc.optimize.fsolve(self.gef_accurate_fsolve,5e9)[0]
-        omega[1] = omega0
+        self.omega[1] = omega0
         self.g = 0.5*(self.Cc/np.sqrt(np.array([self.C[0],self.C[2]])*self.C[1]))*np.sqrt(np.array([self.omega[0],self.omega[2]])*self.omega[1])
-
+        
+        self.eigs = self.sch_Hamiltonian(self.omega[1]).eigenstates()
+        self.logical_eigens = self.eigenstates_logical_states(self.omega[1])#Returns just some combination of |100> and |001> in the degenerate eigenspace
+        self.Eavg = (self.logical_eigens[0][0]+self.logical_eigens[1][0])/2
+        (self.symm_real,self.antisymm_real) = util.corresponding_kets_from_degenerate_subspace(self.logical_eigens[0][1],self.logical_eigens[1][1],self.symm_comp,self.antisymm_comp)
+        (self.state001_real,self.state100_real) = util.corresponding_kets_from_degenerate_subspace(self.logical_eigens[0][1],self.logical_eigens[1][1],self.state001_comp,self.state100_comp)
+        self.state000_real = util.find_best_ket_match(self.eigs[1],self.state000_comp)
+        self.state101_real = util.find_best_ket_match(self.eigs[1],self.state101_comp)
+        self.state020_real = util.find_best_ket_match(self.eigs[1],self.state020_comp)#Note: not all of these match perfectly
+        self.state011_110_sym_real = util.find_best_ket_match(self.eigs[1],(self.state011_comp+self.state110_comp).unit())
+        self.state011_110_antisym_real = util.find_best_ket_match(self.eigs[1],(self.state011_comp-self.state110_comp).unit())
+        
+        
     def gef(self,omegac):
         """The (approximate) effective coupling constant between qubits 1 and 2"""
         delta1 = np.array(self.omega[0]-omegac)
@@ -111,6 +123,11 @@ class tunable_coupling_simulation:
         H = [H0,[Hs1t,used_pulse],[HcCR,lambda t,args: np.sqrt(used_pulse(t,args))*np.exp(-2*Eavg*1.0j*t)]\
                 ,[HcCRdag, lambda t,args: np.sqrt(used_pulse(t,args))*np.exp(2*Eavg*1.0j*t)],[sum(HcJC), lambda t,args: np.sqrt(used_pulse(t,args))]]
         return H
+    
+    def simulate_coefs(self,coefs,times,H,opts,args):
+        S0 = self.state000_real*coefs[0]+self.state001_real*coefs[1]+self.state100_real*coefs[2]+self.state101_real*coefs[3]
+        res = mesolve(H,S0,times,[],[],options=opts,args = args)
+        return res.states
 
     def theoretical_pulse_amplitude(self,used_pulse,T,used_gef):
         A = 0
@@ -232,15 +249,28 @@ class tunable_coupling_simulation:
         return (state-eig000proj+eig000proj*np.exp(1.0j*phase_change)-eig101proj+eig101proj*np.exp(-1.0j*phase_change),phase_change)
     
     def dynamic_phase_fixer_5(self,state,target_state,eig000,eig101):
+        """Finds the optimal angle to rotate the states |000> and |101> to reach target_state from state"""
         eig000proj = (eig000.dag()*state)*eig000
         eig101proj = (eig101.dag()*state)*eig101
         def rotate_eigstates(phi):
             return state-eig000proj+eig000proj*np.exp(1.0j*(-phi))-eig101proj+eig101proj*np.exp(1.0j*phi)
         def negative_target_closeness(phi):
-            return -np.abs((target_state.dag()*rotate_eigstates(phi))[0][0][0])
+            return -np.abs((target_state.dag()*rotate_eigstates(phi))[0][0][0])**2
         res = sc.optimize.minimize_scalar(negative_target_closeness)#,bounds=[0,np.pi],method='bounded')
         return (-res.fun,res.x,rotate_eigstates(res.x))
     
+    def dynamic_phase_fixer_6(self,states,target_states,eig000,eig101):
+        """Finds the optimal angle to rotate the state |000> and |101> to reach target_states from states.
+        Measure of best angle is the mean of the fidelities of the rotated states compared to target_states."""
+        eig000projs = [(eig000.dag()*state)*eig000 for state in states]
+        eig101projs = [(eig101.dag()*state)*eig101 for state in states]
+        def rotate_eigstates(phi):
+            return [state-eig000proj+eig000proj*np.exp(1.0j*(-phi))-eig101proj+eig101proj*np.exp(1.0j*phi) for (state,eig000proj,eig101proj) in zip(states,eig000projs,eig101projs)]
+        def negative_target_closeness(phi):
+            return np.mean([-np.abs((target_state.dag()*rotated)[0][0][0])**2 for (target_state,rotated) in zip(target_states,rotate_eigstates(phi))])
+        res = sc.optimize.minimize_scalar(negative_target_closeness)
+        return (-res.fun,res.x,rotate_eigstates(res.x))
+        
     def rotate_qubit_states(self,state,eig000,eig101,phi):
         eig000proj = (eig000.dag()*state)*eig000
         eig101proj = (eig101.dag()*state)*eig101
